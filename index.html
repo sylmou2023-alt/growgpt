@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GrowGPT Test</title>
+</head>
+<body>
+
+<h1>🌱 GrowGPT Test</h1>
+
+<input id="message" placeholder="Pose ta question..." style="width:300px;">
+<button onclick="send()">Envoyer</button>
+
+<p id="response"></p>
+
+<script>
+async function send() {
+    let msg = document.getElementById("message").value;
+
+    let res = await fetch("https://growgpt.onrender.com/growgpt", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            player_id: "test",
+            message: msg,
+            player: {
+                money: 100,
+                inventory: ["carrot", "tomato"]
+            }
+        })
+    });
+
+    let data = await res.json();
+
+    document.getElementById("response").innerText = data.response;
+}
+</script>
+
+</body>
+</html>
