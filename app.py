@@ -3,11 +3,11 @@ from flask_cors import CORS
 import os
 import time
 
-from core.brain import GrowBrain
-from core.prices import PriceManager
-from core.quests import QuestEngine
-from core.memory import MemoryStore
-from core.upgrader import SelfUpgrader
+from brain import GrowBrain
+from prices import PriceManager
+from quests import QuestEngine
+from memory import MemoryStore
+from upgrader import SelfUpgrader
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
