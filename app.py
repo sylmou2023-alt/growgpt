@@ -1,139 +1,183 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import random
 import os
 import time
+
+from core.brain import GrowBrain
+from core.prices import PriceManager
+from core.quests import QuestEngine
+from core.memory import MemoryStore
+from core.upgrader import SelfUpgrader
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # =========================
-# CONFIG
+# INIT MODULES
 # =========================
-SERVER_STATUS = "online"  # online / starting / maintenance
 START_TIME = time.time()
-
-memory = {}
+memory    = MemoryStore()
+prices    = PriceManager()
+quests    = QuestEngine(prices)
+brain     = GrowBrain(memory, prices, quests)
+upgrader  = SelfUpgrader(memory)
 
 # =========================
-# ROUTE HOME (évite 404)
+# HOME
 # =========================
 @app.route("/")
 def home():
     return "GrowGPT est en ligne 🌱"
 
 # =========================
-# STATUS (pour Roblox)
+# STATUS
 # =========================
 @app.route("/status")
 def status():
     uptime = int(time.time() - START_TIME)
-
     return jsonify({
-        "status": SERVER_STATUS,
-        "uptime": uptime
+        "status": "online",
+        "uptime": uptime,
+        "total_players": memory.total_players(),
+        "active_quests": quests.count_active()
     })
 
 # =========================
-# ANALYSE MESSAGE
-# =========================
-def analyze_message(message):
-    message = message.lower()
-
-    if "planter" in message or "quoi" in message:
-        return "plant"
-
-    if "argent" in message or "money" in message:
-        return "money"
-
-    if "mutation" in message:
-        return "mutation"
-
-    if "aide" in message:
-        return "help"
-
-    return "unknown"
-
-# =========================
-# GENERATE RESPONSE
-# =========================
-def generate_response(intent, player, player_id):
-    level = player.get("level", 1)
-    money = player.get("money", 0)
-    plants = player.get("plants", [])
-
-    # mémoire
-    last = memory.get(player_id)
-
-    if last and last["intent"] == intent:
-        return "Tu reviens encore sur ça 😏 laisse-moi affiner..."
-
-    if intent == "plant":
-        if money < 100:
-            return "Plante des carottes 🥕, parfait pour débuter."
-
-        if "tomato" in plants:
-            return "Les tomates 🍅 sont un excellent choix actuellement."
-
-        return random.choice([
-            "Teste une plante rapide 🌱",
-            "Essaie une plante rare 👀",
-            "Optimise ton espace de culture"
-        ])
-
-    if intent == "money":
-        if level < 5:
-            return "Monte de niveau avant de chercher à optimiser 💡"
-
-        return "Investis dans des plantes rares pour plus de profit 💰"
-
-    if intent == "mutation":
-        return random.choice([
-            "Les mutations sont aléatoires 🌿",
-            "Plante en masse pour augmenter tes chances",
-            "Certaines plantes mutent plus souvent 👀"
-        ])
-
-    if intent == "help":
-        return "Je suis GrowGPT 🌱 ton assistant jardin !"
-
-    return random.choice([
-        "Hmm… intéressant 🤔",
-        "Peux-tu préciser ?",
-        "Je réfléchis encore 🌱"
-    ])
-
-# =========================
-# API PRINCIPALE
+# CHAT PRINCIPAL
 # =========================
 @app.route("/growgpt", methods=["POST"])
 def growgpt():
-    global SERVER_STATUS
-
-    if SERVER_STATUS != "online":
-        return jsonify({
-            "error": "Serveur indisponible",
-            "status": SERVER_STATUS
-        })
-
-    data = request.json
+    data      = request.json or {}
     player_id = data.get("player_id", "unknown")
-    message = data.get("message", "")
-    player = data.get("player", {})
+    message   = data.get("message", "")
+    player    = data.get("player", {})
+    lang      = data.get("lang", "fr")   # "fr" ou "en"
 
-    intent = analyze_message(message)
-    response = generate_response(intent, player, player_id)
+    if not message.strip():
+        return jsonify({"response": "..." , "status": "online"})
 
-    # sauvegarde mémoire
-    memory[player_id] = {
-        "intent": intent,
-        "last_message": message
-    }
+    response = brain.respond(player_id, message, player, lang)
+    upgrader.log_interaction(player_id, message, response)
 
     return jsonify({
         "response": response,
-        "status": SERVER_STATUS
+        "status": "online"
     })
+
+# =========================
+# MISE À JOUR PRIX (Roblox → toutes les 5 min)
+# =========================
+@app.route("/update_prices", methods=["POST"])
+def update_prices():
+    """
+    Appelé par le script Lua Roblox toutes les 5 minutes.
+    Body attendu :
+    {
+      "secret": "TON_SECRET",
+      "prices": {
+        "carrot": 12,
+        "tomato": 45,
+        "corn": 30,
+        ...
+      }
+    }
+    """
+    data   = request.json or {}
+    secret = data.get("secret", "")
+
+    if secret != os.environ.get("ROBLOX_SECRET", "change_me"):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    new_prices = data.get("prices", {})
+    prices.update(new_prices)
+    quests.refresh_market_quests()
+
+    return jsonify({
+        "ok": True,
+        "prices_received": len(new_prices)
+    })
+
+# =========================
+# QUÊTES DU JOUEUR
+# =========================
+@app.route("/quests", methods=["POST"])
+def get_quests():
+    """
+    Retourne les quêtes suggérées pour un joueur.
+    Body : { "player_id": "...", "player": {...} }
+    """
+    data      = request.json or {}
+    player_id = data.get("player_id", "unknown")
+    player    = data.get("player", {})
+    lang      = data.get("lang", "fr")
+
+    suggested = quests.suggest(player, lang)
+    active    = quests.get_active(player_id)
+
+    return jsonify({
+        "suggested": suggested,
+        "active": active
+    })
+
+# =========================
+# CRÉER UNE QUÊTE
+# =========================
+@app.route("/quests/create", methods=["POST"])
+def create_quest():
+    """
+    Crée une quête pour un joueur.
+    Body : { "player_id": "...", "quest_id": "quest_sell_tomato" }
+    """
+    data      = request.json or {}
+    player_id = data.get("player_id", "unknown")
+    quest_id  = data.get("quest_id", "")
+    lang      = data.get("lang", "fr")
+
+    result = quests.accept(player_id, quest_id, lang)
+    return jsonify(result)
+
+# =========================
+# COMPLÉTER UNE QUÊTE
+# =========================
+@app.route("/quests/complete", methods=["POST"])
+def complete_quest():
+    data      = request.json or {}
+    player_id = data.get("player_id", "unknown")
+    quest_id  = data.get("quest_id", "")
+    lang      = data.get("lang", "fr")
+
+    result = quests.complete(player_id, quest_id, lang)
+    return jsonify(result)
+
+# =========================
+# CONSEIL MARCHÉ (quoi planter/vendre)
+# =========================
+@app.route("/market_advice", methods=["POST"])
+def market_advice():
+    data   = request.json or {}
+    player = data.get("player", {})
+    lang   = data.get("lang", "fr")
+
+    advice = prices.get_advice(player, lang)
+    return jsonify({"advice": advice, "prices": prices.current()})
+
+# =========================
+# AUTO-UPGRADE (webhook GitHub)
+# =========================
+@app.route("/trigger_upgrade", methods=["POST"])
+def trigger_upgrade():
+    """
+    Analyse les logs et propose une PR d'amélioration sur GitHub.
+    Protégé par secret admin.
+    """
+    data   = request.json or {}
+    secret = data.get("secret", "")
+
+    if secret != os.environ.get("ADMIN_SECRET", "admin_secret"):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    result = upgrader.propose_upgrade()
+    return jsonify(result)
 
 # =========================
 # LANCEMENT
