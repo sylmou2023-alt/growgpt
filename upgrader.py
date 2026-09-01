@@ -1,266 +1,263 @@
 """
-core/upgrader.py — Auto-amélioration de GrowGPT
-Analyse les interactions et pousse des suggestions d'upgrade sur GitHub via PR.
+upgrader.py — Turns real usage into a reviewable improvement.
 
-Flux :
-  1. log_interaction()      → enregistre chaque échange
-  2. propose_upgrade()      → analyse les logs, génère du code amélioré,
-                               crée une branche GitHub + PR
-  3. Tu reviews la PR sur GitHub et tu merges si OK → Render redéploie
+Flow:
+  1. log_interaction()  records each exchange (persisted, capped)
+  2. propose_upgrade()  reads the stats, writes keywords_extra.json on a new
+                        branch and opens a pull request
+  3. you review it, move words into the right intent, merge — Render redeploys
+
+Two things changed from the original design.
+
+The analysis used to guess each player's intent by searching for words inside
+GrowGPT's own reply, even though brain.py had already computed the intent and
+stored it. It now reads those real numbers from MemoryStore.
+
+More importantly, the pull request used to add a file under upgrades/ that
+nothing in the codebase imported. Merging it changed no behaviour whatsoever;
+the keywords still had to be copied into brain.py by hand. The PR now targets
+keywords_extra.json, which brain.py actually loads at import, so a merged and
+triaged suggestion takes effect on the next deploy with no code editing.
 """
-import os
-import json
-import time
 import base64
-import urllib.request
+import json
+import os
+import time
 import urllib.error
+import urllib.request
+
+from store import store
+
+_LOG_KEY = "growgpt:logs"
+_LOG_MAX = 500
+
+# GitHub is called from a request handler, so it must not hang indefinitely.
+_HTTP_TIMEOUT = 15.0
+
+KEYWORDS_FILE = "keywords_extra.json"
+
+# Words too common to be useful signal about what the bot failed to understand.
+STOPWORDS = {
+    "je", "tu", "il", "elle", "on", "le", "la", "les", "de", "du", "un", "une",
+    "des", "mon", "ma", "mes", "que", "qui", "quoi", "pour", "avec", "dans",
+    "i", "you", "he", "she", "the", "a", "an", "is", "are", "to", "of", "do",
+    "does", "and", "for", "with", "this", "that", "what", "how", "can",
+}
 
 
 class SelfUpgrader:
     def __init__(self, memory):
         self.memory = memory
-        self._logs  = []          # buffer d'interactions brutes
 
     # =========================
-    # LOG
+    # LOGGING
     # =========================
     def log_interaction(self, player_id: str, message: str, response: str):
-        self._logs.append({
+        store.push_capped(_LOG_KEY, {
             "player_id": player_id,
-            "message":   message,
-            "response":  response,
-            "time":      time.time()
-        })
-        # Garde les 500 derniers logs en mémoire
-        if len(self._logs) > 500:
-            self._logs.pop(0)
+            "message": message,
+            "response": response,
+            "time": time.time(),
+        }, _LOG_MAX)
 
     # =========================
-    # ANALYSE & PROPOSITION
-    # =========================
-    def propose_upgrade(self) -> dict:
-        """
-        Analyse les logs et génère un fichier d'upgrade.
-        Pousse le résultat sur une branche GitHub et crée une PR.
-        """
-        if not self._logs:
-            return {"ok": False, "reason": "No logs to analyze yet."}
-
-        analysis = self._analyze_logs()
-        patch    = self._generate_patch(analysis)
-
-        # Écriture locale du patch (pour référence)
-        patch_path = "upgrades/latest_upgrade.py"
-        os.makedirs("upgrades", exist_ok=True)
-        with open(patch_path, "w", encoding="utf-8") as f:
-            f.write(patch)
-
-        # Push sur GitHub
-        pr_url = self._push_to_github(patch, analysis)
-
-        return {
-            "ok":      bool(pr_url),
-            "pr_url":  pr_url,
-            "analysis": analysis,
-            "message": (
-                f"✅ PR créée : {pr_url}\nReview et merge pour déployer."
-                if pr_url else
-                "⚠️ Patch généré localement mais GitHub push a échoué.\n"
-                "Vérifie GITHUB_TOKEN, GITHUB_OWNER et GITHUB_REPO."
-            )
-        }
-
-    # =========================
-    # ANALYSE INTERNE
+    # ANALYSIS
     # =========================
     def _analyze_logs(self) -> dict:
-        """Identifie les faiblesses à partir des logs."""
-        unknown_msgs   = [l["message"] for l in self._logs
-                           if "Hmm" in l["response"] or "préciser" in l["response"]
-                              or "rephrase" in l["response"].lower()]
-        intent_counts  = {}
-        for l in self._logs:
-            # Essaie de deviner l'intent depuis la réponse
-            resp = l["response"].lower()
-            if "plante" in resp or "plant" in resp:
-                intent_counts["plant_advice"] = intent_counts.get("plant_advice", 0) + 1
-            elif "vend" in resp or "sell" in resp or "prix" in resp or "price" in resp:
-                intent_counts["sell_advice"]  = intent_counts.get("sell_advice", 0) + 1
-            elif "quête" in resp or "quest" in resp:
-                intent_counts["quest"]        = intent_counts.get("quest", 0) + 1
-            else:
-                intent_counts["unknown"]      = intent_counts.get("unknown", 0) + 1
-
-        # Extraire des mots-clés des messages inconnus
-        new_keywords = self._extract_keywords(unknown_msgs)
+        logs = store.list_all(_LOG_KEY)
+        unknown = self.memory.unknown_messages()
 
         return {
-            "total_interactions":  len(self._logs),
-            "unknown_messages":    unknown_msgs[:10],
-            "intent_distribution": intent_counts,
-            "suggested_keywords":  new_keywords,
-            "timestamp":           time.strftime("%Y-%m-%d %H:%M:%S")
+            "total_interactions":  len(logs),
+            "unknown_count":       len(unknown),
+            "unknown_messages":    unknown[-10:],
+            "intent_distribution": self.memory.most_common_intents(),
+            "suggested_keywords":  self._extract_keywords(unknown),
+            "timestamp":           time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
     def _extract_keywords(self, messages: list) -> dict:
-        """
-        Extrait les mots fréquents dans les messages non compris
-        pour suggérer de nouveaux mots-clés.
-        """
-        STOPWORDS = {"je", "tu", "il", "le", "la", "les", "de", "du", "un", "une",
-                      "i", "the", "a", "an", "is", "are", "to", "of", "do", "you"}
+        """Most frequent meaningful words among messages we failed to classify."""
         counts = {}
         for msg in messages:
-            for word in msg.lower().split():
-                w = word.strip(".,!?;:")
+            for word in str(msg).lower().split():
+                w = word.strip(".,!?;:\"'()")
                 if len(w) > 3 and w not in STOPWORDS:
                     counts[w] = counts.get(w, 0) + 1
-        # Retourne les 10 plus fréquents
-        return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True)[:10])
+        return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:15])
 
     # =========================
-    # GÉNÉRATION DU PATCH
+    # PROPOSAL
     # =========================
-    def _generate_patch(self, analysis: dict) -> str:
+    def propose_upgrade(self) -> dict:
+        analysis = self._analyze_logs()
+
+        if not analysis["suggested_keywords"]:
+            return {
+                "ok": False,
+                "reason": "Nothing to suggest yet: no unclassified messages recorded.",
+                "analysis": analysis,
+            }
+
+        pr_url = self._push_to_github(analysis)
+        return {
+            "ok": bool(pr_url),
+            "pr_url": pr_url,
+            "analysis": analysis,
+            "message": (
+                "PR opened: %s — move each word into the right intent, then merge." % pr_url
+                if pr_url else
+                "Analysis done but the GitHub push failed. "
+                "Check GITHUB_TOKEN, GITHUB_OWNER and GITHUB_REPO."
+            ),
+        }
+
+    def _build_keywords_file(self, existing: dict, analysis: dict) -> str:
         """
-        Génère un fichier Python contenant les nouveaux mots-clés suggérés.
-        Ce fichier est ensuite reviewé et mergé manuellement.
+        Merge new candidates into the existing file.
+
+        Words land in `pending_review`, never straight into an intent: only a
+        human knows whether "arroser" belongs to plant_advice or to a topic the
+        bot does not cover at all. brain.py ignores `pending_review`, so merging
+        this PR is always safe, and moving a word into an intent list is the
+        one manual step that actually enables it.
         """
-        keywords = analysis.get("suggested_keywords", {})
-        unknown  = analysis.get("unknown_messages", [])
-        timestamp = analysis.get("timestamp", "")
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.setdefault("_readme", (
+            "Move a word from pending_review into one of the intent lists below "
+            "to teach GrowGPT. Keys starting with _ and pending_review are ignored "
+            "at runtime."
+        ))
+        merged["_generated"] = analysis["timestamp"]
 
-        lines = [
-            "# ==============================================",
-            f"# AUTO-UPGRADE SUGGESTION — {timestamp}",
-            "# Généré par GrowGPT SelfUpgrader",
-            "# À REVIEWER AVANT DE MERGER",
-            "# ==============================================",
-            "",
-            "# Basé sur l'analyse de :",
-            f"#   - {analysis.get('total_interactions', 0)} interactions",
-            f"#   - {len(unknown)} messages non compris",
-            "",
-            "# Ajoute ces mots-clés dans core/brain.py > INTENTS",
-            "# en les classant dans la bonne intention.",
-            "",
-            "SUGGESTED_NEW_KEYWORDS = {",
-        ]
+        for intent in ("plant_advice", "sell_advice", "quest", "mutation",
+                       "level", "help", "greeting", "thanks"):
+            merged.setdefault(intent, [])
 
-        for word, count in keywords.items():
-            lines.append(f'    "{word}": {count},  # vu {count}x dans les messages non compris')
+        already = {
+            w.lower()
+            for key, value in merged.items()
+            if isinstance(value, list)
+            for w in value
+        }
 
-        lines += [
-            "}",
-            "",
-            "# Exemples de messages non compris :",
-        ]
-        for msg in unknown[:5]:
-            lines.append(f'# - "{msg}"')
+        pending = merged.get("pending_review")
+        pending = dict(pending) if isinstance(pending, dict) else {}
+        for word, count in analysis["suggested_keywords"].items():
+            if word not in already:
+                pending[word] = count
+        merged["pending_review"] = pending
 
-        lines += [
-            "",
-            "# ==============================================",
-            "# INSTRUCTIONS :",
-            "# 1. Regarde les mots-clés ci-dessus",
-            "# 2. Identifie leur intention (plant_advice, sell_advice, etc.)",
-            "# 3. Ajoute-les dans INTENTS dans core/brain.py",
-            "# 4. Merge cette PR pour déployer l'amélioration",
-            "# ==============================================",
-        ]
-
-        return "\n".join(lines)
+        return json.dumps(merged, indent=2, ensure_ascii=False, sort_keys=True)
 
     # =========================
     # GITHUB
     # =========================
-    def _push_to_github(self, content: str, analysis: dict) -> str | None:
-        """
-        Crée une branche 'growgpt-upgrade-{timestamp}' sur GitHub,
-        commit le patch, et ouvre une Pull Request.
-        Retourne l'URL de la PR ou None en cas d'échec.
-        """
+    def _push_to_github(self, analysis: dict):
         token = os.environ.get("GITHUB_TOKEN")
         owner = os.environ.get("GITHUB_OWNER")
-        repo  = os.environ.get("GITHUB_REPO")
+        repo = os.environ.get("GITHUB_REPO")
+        base_branch = os.environ.get("GITHUB_BASE_BRANCH", "main")
 
         if not all([token, owner, repo]):
             return None
 
         headers = {
-            "Authorization": f"token {token}",
-            "Accept":        "application/vnd.github.v3+json",
-            "Content-Type":  "application/json"
+            "Authorization": "token %s" % token,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "growgpt-self-upgrader",
         }
-        base_url    = f"https://api.github.com/repos/{owner}/{repo}"
-        branch_name = f"growgpt-upgrade-{int(time.time())}"
+        base_url = "https://api.github.com/repos/%s/%s" % (owner, repo)
+        branch = "growgpt-upgrade-%d" % int(time.time())
 
         try:
-            # 1. Récupérer le SHA du dernier commit sur main
-            sha = self._gh_get(f"{base_url}/git/ref/heads/main", headers)["object"]["sha"]
+            ref = self._gh("GET", "%s/git/ref/heads/%s" % (base_url, base_branch), headers)
+            sha = ref["object"]["sha"]
 
-            # 2. Créer la nouvelle branche
-            self._gh_post(f"{base_url}/git/refs", headers, {
-                "ref": f"refs/heads/{branch_name}",
-                "sha": sha
+            self._gh("POST", "%s/git/refs" % base_url, headers, {
+                "ref": "refs/heads/%s" % branch,
+                "sha": sha,
             })
 
-            # 3. Créer le fichier sur la nouvelle branche
-            file_content = base64.b64encode(content.encode()).decode()
-            file_path    = f"upgrades/upgrade_{int(time.time())}.py"
-            self._gh_put(f"{base_url}/contents/{file_path}", headers, {
-                "message": f"🤖 GrowGPT self-upgrade suggestion [{analysis['timestamp']}]",
-                "content": file_content,
-                "branch":  branch_name
-            })
-
-            # 4. Ouvrir la Pull Request
-            unknown_count = len(analysis.get("unknown_messages", []))
-            total         = analysis.get("total_interactions", 0)
-            pr_body = (
-                f"## 🤖 GrowGPT Auto-Upgrade\n\n"
-                f"**Généré le :** {analysis['timestamp']}\n"
-                f"**Interactions analysées :** {total}\n"
-                f"**Messages non compris :** {unknown_count}\n\n"
-                f"### Mots-clés suggérés\n"
-                + "\n".join(f"- `{k}` ({v}x)" for k, v in
-                             analysis.get("suggested_keywords", {}).items())
-                + "\n\n### Messages non compris (exemples)\n"
-                + "\n".join(f"- _{m}_" for m in
-                             analysis.get("unknown_messages", [])[:5])
-                + "\n\n---\n"
-                  "**⚠️ À vérifier avant de merger !**\n"
-                  "Ajoute les mots-clés pertinents dans `core/brain.py`."
+            # Read the current file so repeated runs accumulate instead of
+            # overwriting, and so we can supply the blob sha GitHub requires
+            # when updating an existing path.
+            current = self._gh(
+                "GET",
+                "%s/contents/%s?ref=%s" % (base_url, KEYWORDS_FILE, base_branch),
+                headers,
+                allow_missing=True,
             )
+            existing = {}
+            file_sha = None
+            if current:
+                file_sha = current.get("sha")
+                try:
+                    existing = json.loads(
+                        base64.b64decode(current.get("content", "")).decode("utf-8"))
+                except (ValueError, TypeError):
+                    existing = {}
 
-            pr_data = self._gh_post(f"{base_url}/pulls", headers, {
-                "title": f"🌱 GrowGPT Upgrade — {unknown_count} messages améliorés",
-                "body":  pr_body,
-                "head":  branch_name,
-                "base":  "main"
+            content = self._build_keywords_file(existing, analysis)
+            payload = {
+                "message": "GrowGPT: %d keyword suggestions from real usage" % len(
+                    analysis["suggested_keywords"]),
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                "branch": branch,
+            }
+            if file_sha:
+                payload["sha"] = file_sha
+            self._gh("PUT", "%s/contents/%s" % (base_url, KEYWORDS_FILE), headers, payload)
+
+            pr = self._gh("POST", "%s/pulls" % base_url, headers, {
+                "title": "GrowGPT: %d new keyword suggestions" % len(
+                    analysis["suggested_keywords"]),
+                "body": self._pr_body(analysis),
+                "head": branch,
+                "base": base_branch,
             })
-            return pr_data.get("html_url")
+            return pr.get("html_url")
 
-        except Exception as e:
-            print(f"[SelfUpgrader] GitHub error: {e}")
+        except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+            print("[SelfUpgrader] GitHub error: %s" % exc, flush=True)
             return None
 
-    # =========================
-    # HELPERS HTTP
-    # =========================
-    def _gh_get(self, url: str, headers: dict) -> dict:
-        req  = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+    def _pr_body(self, analysis: dict) -> str:
+        keywords = analysis["suggested_keywords"]
+        lines = [
+            "## GrowGPT self-upgrade",
+            "",
+            "Generated %s from %d logged interactions, %d of which the intent "
+            "scorer could not classify." % (
+                analysis["timestamp"], analysis["total_interactions"],
+                analysis["unknown_count"]),
+            "",
+            "### Candidate keywords",
+            "",
+        ]
+        lines += ["- `%s` — seen %dx" % (w, c) for w, c in keywords.items()]
+        lines += ["", "### Sample messages that were not understood", ""]
+        lines += ["- _%s_" % m for m in analysis["unknown_messages"][:5]]
+        lines += [
+            "",
+            "---",
+            "",
+            "These land in `pending_review`, which is ignored at runtime, so "
+            "merging as-is changes nothing. To actually teach the bot a word, "
+            "move it from `pending_review` into the matching intent list in "
+            "`%s` before merging." % KEYWORDS_FILE,
+        ]
+        return "\n".join(lines)
 
-    def _gh_post(self, url: str, headers: dict, body: dict) -> dict:
-        data = json.dumps(body).encode()
-        req  = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-
-    def _gh_put(self, url: str, headers: dict, body: dict) -> dict:
-        data = json.dumps(body).encode()
-        req  = urllib.request.Request(url, data=data, headers=headers, method="PUT")
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+    def _gh(self, method: str, url: str, headers: dict,
+            payload: dict = None, allow_missing: bool = False):
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if allow_missing and exc.code == 404:
+                return None
+            raise

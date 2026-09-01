@@ -1,10 +1,25 @@
 """
-core/brain.py — Moteur NLP de GrowGPT
-Comprend le langage naturel sans API externe grâce à un système
-de scoring par intention + réponses contextuelles riches.
+brain.py — GrowGPT's intent engine.
+
+Understands the player without any external API: keyword scoring picks an
+intent, then a response template is filled with live market data.
+
+Matching runs on normalised words (no accents, no plurals) on both sides, so
+"plantes" now reaches the same intent as "planter" — the previous exact-string
+comparison understood one and not the other.
 """
+import json
+import os
 import random
-import re
+
+from text_utils import (
+    DEFAULT_LANG,
+    close_enough,
+    normalize_lang,
+    normalize_phrase,
+    normalize_token,
+    tokenize,
+)
 
 
 # =========================
@@ -64,42 +79,117 @@ INTENTS = {
 }
 
 
-def detect_language(message: str) -> str:
-    """Détecte si le message est en français ou en anglais."""
-    fr_markers = ["le", "la", "les", "de", "du", "un", "une", "je", "tu", "il",
-                   "nous", "vous", "est", "sont", "quoi", "que", "qui", "ça"]
-    en_markers = ["the", "a", "an", "is", "are", "i", "you", "he", "she", "we",
-                   "they", "what", "how", "do", "does", "can", "should", "it"]
-    words = message.lower().split()
-    fr_score = sum(1 for w in words if w in fr_markers)
-    en_score = sum(1 for w in words if w in en_markers)
-    return "en" if en_score > fr_score else "fr"
+def _load_extra_keywords() -> dict:
+    """
+    Keywords learned from real usage, read from keywords_extra.json.
+
+    upgrader.py opens a pull request against that file; loading it here is what
+    makes merging the PR mean anything — before, the suggestions landed in a
+    file nothing imported. Only keys naming a known intent are honoured, so the
+    upgrader's `pending_review` bucket stays inert until a human triages it.
+    A missing or malformed file is not an error: the bot falls back to its
+    built-in keywords.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "keywords_extra.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        intent: [str(w) for w in words]
+        for intent, words in data.items()
+        if intent in INTENTS and isinstance(words, list)
+    }
+
+
+EXTRA_KEYWORDS = _load_extra_keywords()
+
+# Keywords normalised once at import, exactly as player input will be. Both
+# sides must go through the same folding or the comparison silently misses.
+_NORMALIZED_INTENTS = {
+    intent: (
+        {normalize_phrase(kw) for kws in langs.values() for kw in kws}
+        | {normalize_phrase(kw) for kw in EXTRA_KEYWORDS.get(intent, [])}
+    )
+    for intent, langs in INTENTS.items()
+}
+
+# Single words only, used for the fuzzy pass. Multi-word keywords are excluded:
+# edit distance across a bigram matches far too loosely.
+_FUZZY_KEYWORDS = {
+    intent: [kw for kw in kws if " " not in kw]
+    for intent, kws in _NORMALIZED_INTENTS.items()
+}
+
+_FR_MARKERS = {normalize_token(w) for w in [
+    "le", "la", "les", "de", "du", "un", "une", "je", "tu", "il",
+    "nous", "vous", "est", "sont", "quoi", "que", "qui", "ça", "mes", "mon",
+]}
+_EN_MARKERS = {normalize_token(w) for w in [
+    "the", "an", "is", "are", "you", "he", "she", "we",
+    "they", "what", "how", "does", "can", "should", "it", "my", "me",
+]}
+# Words the two lists would otherwise share after folding tell us nothing.
+_FR_MARKERS -= _EN_MARKERS & _FR_MARKERS
+_EN_MARKERS -= _EN_MARKERS & _FR_MARKERS
+
+
+def detect_language(message: str, default: str = DEFAULT_LANG) -> str:
+    """
+    Guess the language, falling back to `default` when the evidence is thin.
+
+    The old version returned French on a tie, which meant every short English
+    message ("price?", "hello", "sell my carrots") was answered in French — a
+    tie is exactly what a short message produces. Returning the caller's
+    declared language instead lets Roblox settle it, since the game knows the
+    player's locale and we do not.
+    """
+    words = set(tokenize(message))
+    fr_score = len(words & _FR_MARKERS)
+    en_score = len(words & _EN_MARKERS)
+    if en_score > fr_score:
+        return "en"
+    if fr_score > en_score:
+        return "fr"
+    return normalize_lang(default)
 
 
 def score_intent(message: str) -> str:
     """
-    Calcule le score de chaque intention et retourne la plus probable.
-    Prend en compte les combinaisons de mots (bigrammes).
-    """
-    msg = message.lower()
-    # Nettoyer ponctuation
-    msg = re.sub(r"[^\w\s]", " ", msg)
-    words  = msg.split()
-    bigrams = [words[i] + " " + words[i+1] for i in range(len(words)-1)]
-    tokens  = words + bigrams
+    Score every intent against the message and return the strongest.
 
-    scores = {}
-    for intent, langs in INTENTS.items():
-        score = 0
-        for lang_kws in langs.values():
-            for kw in lang_kws:
-                if kw in tokens:
-                    # Bigrammes valent plus
-                    score += 2 if " " in kw else 1
-        scores[intent] = score
+    Bigrams count double: "quoi planter" is far better evidence than "plante"
+    appearing on its own.
+    """
+    tokens = set(tokenize(message))
+    if not tokens:
+        return "unknown"
+
+    scores = {
+        intent: sum(2 if " " in kw else 1 for kw in kws if kw in tokens)
+        for intent, kws in _NORMALIZED_INTENTS.items()
+    }
 
     best = max(scores, key=lambda k: scores[k])
-    return best if scores[best] > 0 else "unknown"
+    if scores[best] > 0:
+        return best
+
+    # Nothing matched exactly. Retry allowing one typo per word before giving
+    # up, so "planté", "mutaton" or "vendr" still land somewhere sensible.
+    single_tokens = [t for t in tokens if " " not in t]
+    fuzzy = {
+        intent: sum(
+            1 for token in single_tokens
+            if any(close_enough(token, kw) for kw in kws)
+        )
+        for intent, kws in _FUZZY_KEYWORDS.items()
+    }
+    best_fuzzy = max(fuzzy, key=lambda k: fuzzy[k])
+    return best_fuzzy if fuzzy[best_fuzzy] > 0 else "unknown"
 
 
 # =========================
@@ -294,16 +384,19 @@ class GrowBrain:
         self.quests = quests
 
     def respond(self, player_id: str, message: str, player: dict, lang: str = "fr") -> str:
-        # Détection auto de langue si pas précisée
-        detected_lang = detect_language(message)
-        lang = detected_lang  # on fait confiance à la détection
+        # The language Roblox declares is the starting point; detection only
+        # overrides it when the message clearly says otherwise. The old code
+        # discarded the caller's value outright and trusted a detector that
+        # answers "fr" whenever it is unsure.
+        lang = detect_language(message, default=normalize_lang(lang))
 
         intent = score_intent(message)
 
-        # Contexte joueur
-        level  = player.get("level", 1)
-        money  = player.get("money", 0)
-        plants = player.get("plants", [])
+        # Player context
+        player = player or {}
+        level  = player.get("level", 1) or 1
+        money  = player.get("money", 0) or 0
+        plants = player.get("plants", []) or []
         name   = player.get("name", "Farmer")
 
         # Historique mémoire
@@ -337,17 +430,19 @@ class GrowBrain:
             f"{p}: {v}💵" for p, v in list(current_prices.items())[:3]
         ) if current_prices else ("aucun prix dispo" if lang == "fr" else "no prices available")
 
-        # Données quêtes
-        quest_suggestion = self.quests.suggest(player, lang)
-        quest_plant = quest_suggestion[0]["target_plant"] if quest_suggestion else ("carotte" if lang == "fr" else "carrot")
+        # Quest filler. hint_plant() is deliberately side-effect free: calling
+        # suggest() here would write a catalog entry per suggested quest on
+        # every single chat message, just to obtain one crop name.
+        quest_plant = self.quests.hint_plant(player)
         quest_amount = 10
         daily_challenge = (
             "Vends 5 plantes rares en 10 min" if lang == "fr"
             else "Sell 5 rare plants in 10 min"
         )
 
-        # Résoudre la plante actuelle du joueur
-        current_plant = plants[0] if plants else best_plant
+        # Resolve the player's current crop. Roblox sends display casing, the
+        # price table is keyed lowercase.
+        current_plant = str(plants[0]).lower() if plants else best_plant
         current_price = current_prices.get(current_plant, best_price)
 
         # XP advice selon level
@@ -384,8 +479,15 @@ class GrowBrain:
 
         template = random.choice(pool)
 
-        # Remplir les variables du template
-        return template.format(
+        # Any reply that quotes a number has to say when that number is not
+        # actually live, otherwise stale or fallback prices are indistinguishable
+        # from real ones — which is the exact failure this project cares about.
+        caveat = (
+            self.prices.freshness_warning(lang)
+            if intent in ("plant_advice", "sell_advice") else ""
+        )
+
+        filled = template.format(
             name=name,
             level=level,
             money=money,
@@ -403,3 +505,4 @@ class GrowBrain:
             xp_advice=xp_advice,
             mutation_plant=mutation_plant,
         )
+        return filled + caveat

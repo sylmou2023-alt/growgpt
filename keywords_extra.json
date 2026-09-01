@@ -1,0 +1,12 @@
+{
+  "_readme": "Move a word from pending_review into one of the intent lists below to teach GrowGPT. Keys starting with _ and pending_review are ignored at runtime, so merging an untriaged file changes nothing. upgrader.py appends candidates here through a pull request.",
+  "greeting": [],
+  "help": [],
+  "level": [],
+  "mutation": [],
+  "pending_review": {},
+  "plant_advice": [],
+  "quest": [],
+  "sell_advice": [],
+  "thanks": []
+}
