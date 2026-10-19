@@ -6,6 +6,8 @@ de scoring par intention + réponses contextuelles riches.
 import random
 import re
 
+from llm import LLMClient
+
 
 # =========================
 # INTENTIONS & MOTS-CLÉS
@@ -292,6 +294,7 @@ class GrowBrain:
         self.memory = memory
         self.prices = prices
         self.quests = quests
+        self.llm    = LLMClient()
 
     def respond(self, player_id: str, message: str, player: dict, lang: str = "fr") -> str:
         # Détection auto de langue si pas précisée
@@ -319,9 +322,52 @@ class GrowBrain:
             prefix = ""
 
         response = self._build_response(intent, lang, player, level, money, plants, name)
+
+        # Si un vrai modèle est configuré, il reformule la réponse librement
+        # en s'appuyant sur les données du jeu ; sinon on garde le modèle classique.
+        llm_response = self._ask_llm(message, lang, player, response, history)
+        if llm_response:
+            response, prefix = llm_response, ""
+
         self.memory.update(player_id, {"last_intent": intent, "last_message": message})
+        self.memory.add_turn(player_id, message, response)
 
         return prefix + response
+
+    def _ask_llm(self, message: str, lang: str, player: dict,
+                 hint: str, history: dict) -> str | None:
+        if not self.llm.enabled:
+            return None
+
+        best_plant, best_price   = self.prices.best_to_sell()
+        cheap_plant, cheap_price = self.prices.cheapest_to_plant()
+        prices_text = ", ".join(f"{p}: {v}" for p, v in self.prices.current().items())
+        quests_text = ", ".join(q.get("title", "") for q in self.quests.suggest(player, lang)[:3])
+
+        system = (
+            "Tu es GrowGPT, un PNJ sympathique dans un jeu Roblox de jardinage. "
+            "Tu parles à des joueurs, souvent jeunes : reste bienveillant, simple et "
+            "adapté à tous les âges. Réponds en 1 à 3 phrases courtes, avec au plus un emoji. "
+            "Ne demande jamais d'informations personnelles et ne parle pas de sujets hors du jeu "
+            "de façon détaillée : ramène gentiment la conversation vers le jardinage. "
+            f"Réponds dans la langue du joueur ({'français' if lang == 'fr' else 'anglais'}).\n\n"
+            "Données du jeu en ce moment :\n"
+            f"- Prix du marché : {prices_text}\n"
+            f"- Meilleure plante à vendre (prix au-dessus de la normale) : {best_plant} ({best_price})\n"
+            f"- Meilleur rapport gain/coût à planter : {cheap_plant} (coût {cheap_price})\n"
+            f"- Quêtes suggérées : {quests_text or 'aucune'}\n"
+            f"- Joueur : {player.get('name', 'Farmer')}, niveau {player.get('level', 1)}, "
+            f"{player.get('money', 0)} pièces, plantes : {', '.join(player.get('plants', [])) or 'aucune'}\n\n"
+            f"Idée de réponse proposée par le jeu (tu peux t'en inspirer) : {hint}"
+        )
+
+        messages = [{"role": "system", "content": system}]
+        for turn in history.get("turns", [])[-6:]:
+            messages.append({"role": "user",      "content": turn["user"]})
+            messages.append({"role": "assistant", "content": turn["bot"]})
+        messages.append({"role": "user", "content": message})
+
+        return self.llm.chat(messages)
 
     def _build_response(self, intent: str, lang: str,
                          player: dict, level: int, money: int,

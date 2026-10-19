@@ -20,6 +20,12 @@ class MemoryStore:
         self._store[player_id]["interaction_count"] = \
             self._store[player_id].get("interaction_count", 0) + 1
 
+    def add_turn(self, player_id: str, user_msg: str, bot_msg: str, keep: int = 10):
+        """Garde les derniers échanges pour que l'IA se souvienne de la conversation."""
+        turns = self._store.setdefault(player_id, {}).setdefault("turns", [])
+        turns.append({"user": user_msg, "bot": bot_msg})
+        del turns[:-keep]
+
     def total_players(self) -> int:
         return len(self._store)
 
