@@ -21,7 +21,7 @@ class LLMClient:
     def enabled(self) -> bool:
         return bool(self.api_key)
 
-    def chat(self, messages: list, max_tokens: int = 150) -> str | None:
+    def chat(self, messages: list, max_tokens: int = 90) -> str | None:
         """Envoie la conversation au modèle. Retourne None en cas d'échec."""
         if not self.enabled:
             return None

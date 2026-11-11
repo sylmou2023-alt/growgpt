@@ -341,28 +341,24 @@ class GrowBrain:
 
         best_plant, best_price   = self.prices.best_to_sell()
         cheap_plant, cheap_price = self.prices.cheapest_to_plant()
-        prices_text = ", ".join(f"{p}: {v}" for p, v in self.prices.current().items())
-        quests_text = ", ".join(q.get("title", "") for q in self.quests.suggest(player, lang)[:3])
+        quests_text = ", ".join(q.get("title", "") for q in self.quests.suggest(player, lang)[:2])
 
+        # Prompt volontairement court : sur le serveur Oracle (sans carte graphique),
+        # chaque mot du prompt coûte du temps. La partie fixe est en premier pour
+        # que llama.cpp la garde en cache d'une question à l'autre.
         system = (
-            "Tu es GrowGPT, un PNJ sympathique dans un jeu Roblox de jardinage. "
-            "Tu parles à des joueurs, souvent jeunes : reste bienveillant, simple et "
-            "adapté à tous les âges. Réponds en 1 à 3 phrases courtes, avec au plus un emoji. "
-            "Ne demande jamais d'informations personnelles et ne parle pas de sujets hors du jeu "
-            "de façon détaillée : ramène gentiment la conversation vers le jardinage. "
-            f"Réponds dans la langue du joueur ({'français' if lang == 'fr' else 'anglais'}).\n\n"
-            "Données du jeu en ce moment :\n"
-            f"- Prix du marché : {prices_text}\n"
-            f"- Meilleure plante à vendre (prix au-dessus de la normale) : {best_plant} ({best_price})\n"
-            f"- Meilleur rapport gain/coût à planter : {cheap_plant} (coût {cheap_price})\n"
-            f"- Quêtes suggérées : {quests_text or 'aucune'}\n"
-            f"- Joueur : {player.get('name', 'Farmer')}, niveau {player.get('level', 1)}, "
-            f"{player.get('money', 0)} pièces, plantes : {', '.join(player.get('plants', [])) or 'aucune'}\n\n"
-            f"Idée de réponse proposée par le jeu (tu peux t'en inspirer) : {hint}"
+            "Tu es GrowGPT, un PNJ gentil d'un jeu Roblox de jardinage. Les joueurs sont souvent "
+            "jeunes : réponds en 1 ou 2 phrases courtes et simples, sans demander d'infos "
+            "personnelles, et ramène la conversation vers le jeu. "
+            f"Langue : {'français' if lang == 'fr' else 'anglais'}.\n"
+            f"Marché : meilleure vente {best_plant} ({best_price}), "
+            f"meilleur rapport à planter {cheap_plant} (coût {cheap_price}). "
+            f"Quêtes : {quests_text or 'aucune'}. "
+            f"Joueur : niveau {player.get('level', 1)}, {player.get('money', 0)} pièces."
         )
 
         messages = [{"role": "system", "content": system}]
-        for turn in history.get("turns", [])[-6:]:
+        for turn in history.get("turns", [])[-3:]:
             messages.append({"role": "user",      "content": turn["user"]})
             messages.append({"role": "assistant", "content": turn["bot"]})
         messages.append({"role": "user", "content": message})
