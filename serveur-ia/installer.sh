@@ -14,14 +14,15 @@ PORT="${PORT:-8080}"
 
 echo "== 1/4 Paquets nécessaires"
 sudo apt-get update -y
-sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y build-essential cmake git libcurl4-openssl-dev iptables-persistent
+sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y build-essential cmake git libssl-dev iptables-persistent
 
 echo "== 2/4 Compilation de llama.cpp (quelques minutes)"
 if [ ! -d "$HOME/llama.cpp" ]; then
   git clone --depth 1 https://github.com/ggml-org/llama.cpp "$HOME/llama.cpp"
 fi
 cd "$HOME/llama.cpp"
-cmake -B build -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release
+rm -f build/CMakeCache.txt
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)" --target llama-server
 
 echo "== 3/4 Service qui démarre tout seul (et télécharge le modèle au 1er lancement)"

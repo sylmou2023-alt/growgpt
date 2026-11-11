@@ -20,7 +20,7 @@ ssh -i chemin\vers\cle.key ubuntu@IP_DU_SERVEUR
 Puis sur le serveur :
 ```
 curl -O https://raw.githubusercontent.com/sylmou2023-alt/growgpt/main/serveur-ia/installer.sh
-CLE_API="choisis_un_long_mot_de_passe" bash installer.sh
+CLE_API="LettresEtChiffresUniquement" bash installer.sh
 ```
 Le script compile llama.cpp, télécharge Mistral 7B (~4 Go) et le lance au démarrage du serveur.
 
