@@ -14,7 +14,7 @@ PORT="${PORT:-8080}"
 
 echo "== 1/4 Paquets nécessaires"
 sudo apt-get update -y
-sudo apt-get install -y build-essential cmake git libcurl4-openssl-dev iptables-persistent
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential cmake git libcurl4-openssl-dev iptables-persistent
 
 echo "== 2/4 Compilation de llama.cpp (quelques minutes)"
 if [ ! -d "$HOME/llama.cpp" ]; then
