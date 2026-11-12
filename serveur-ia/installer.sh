@@ -45,7 +45,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now growgpt-ia
 
 echo "== 4/4 Ouverture du port $PORT dans le pare-feu du serveur"
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport "$PORT" -j ACCEPT
+# La règle doit passer AVANT la ligne REJECT de l'image Oracle, sinon elle ne sert à rien
+if ! sudo iptables -C INPUT -m state --state NEW -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null; then
+  LIGNE_REJECT=$(sudo iptables -L INPUT --line-numbers -n | awk '$2 == "REJECT" {print $1; exit}')
+  sudo iptables -I INPUT "${LIGNE_REJECT:-1}" -m state --state NEW -p tcp --dport "$PORT" -j ACCEPT
+fi
 sudo netfilter-persistent save
 
 IP=$(curl -s https://ifconfig.me || echo "TON_IP")
