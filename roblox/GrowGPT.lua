@@ -12,7 +12,7 @@ local GrowGPT = {}
 -- ⚙️ CONFIG — remplace par ton URL Render
 -- (ce module est côté serveur : les joueurs ne peuvent pas lire le secret)
 GrowGPT.URL    = "https://TON-APP.onrender.com"
-GrowGPT.SECRET = "TON_SECRET"   -- même valeur que ROBLOX_SECRET dans Render
+GrowGPT.SECRET = "GROWGPTROBLOX_PRICE31430"   -- même valeur que ROBLOX_SECRET dans Render
 
 -- ⚙️ Intervalle de synchro des prix (300 = 5 minutes)
 -- Bonus : ça garde aussi le serveur Render gratuit réveillé tant qu'un serveur Roblox tourne
