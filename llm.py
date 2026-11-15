@@ -10,6 +10,12 @@ import urllib.request
 import urllib.error
 
 
+def _couper_a_la_derniere_phrase(text: str) -> str:
+    """Réponse coupée par la limite de longueur : on garde les phrases complètes."""
+    fin = max(text.rfind(c) for c in ".!?")
+    return text[:fin + 1] if fin > 0 else text
+
+
 class LLMClient:
     def __init__(self):
         self.api_key  = os.environ.get("LLM_API_KEY", "")
@@ -21,7 +27,7 @@ class LLMClient:
     def enabled(self) -> bool:
         return bool(self.api_key)
 
-    def chat(self, messages: list, max_tokens: int = 90) -> str | None:
+    def chat(self, messages: list, max_tokens: int = 120) -> str | None:
         """Envoie la conversation au modèle. Retourne None en cas d'échec."""
         if not self.enabled:
             return None
@@ -46,7 +52,10 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            text = data["choices"][0]["message"]["content"].strip()
+            choice = data["choices"][0]
+            text   = choice["message"]["content"].strip()
+            if choice.get("finish_reason") == "length":
+                text = _couper_a_la_derniere_phrase(text)
             return text or None
         except (urllib.error.URLError, TimeoutError, KeyError, IndexError, ValueError) as e:
             # Quota gratuit dépassé, API en panne... on retombe sur les réponses classiques

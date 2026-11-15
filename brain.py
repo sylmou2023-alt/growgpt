@@ -348,7 +348,7 @@ class GrowBrain:
         # que llama.cpp la garde en cache d'une question à l'autre.
         system = (
             "Tu es GrowGPT, un PNJ gentil d'un jeu Roblox de jardinage. Les joueurs sont souvent "
-            "jeunes : réponds en 1 ou 2 phrases courtes et simples, sans demander d'infos "
+            "jeunes : tutoie-les et réponds en 1 ou 2 phrases courtes et simples, sans demander d'infos "
             "personnelles, et ramène la conversation vers le jeu. "
             f"Langue : {'français' if lang == 'fr' else 'anglais'}.\n"
             f"Marché : meilleure vente {best_plant} ({best_price}), "
