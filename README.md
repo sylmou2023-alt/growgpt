@@ -6,9 +6,13 @@
 growgpt/
 ├── app.py                    ← Point d'entrée Flask (routes)
 ├── requirements.txt
-├── GrowGPT_PriceSync.lua     ← Script Roblox
+├── roblox/
+│   ├── GrowGPT.lua               ← ModuleScript (connexion + prix + filtre)
+│   ├── GrowGPT_Chat.server.lua   ← Script : écoute "@growgpt" dans le chat
+│   └── GrowGPT_Display.client.lua← LocalScript : affiche les réponses
 ├── core/
 │   ├── brain.py              ← NLP + génération de réponses
+│   ├── llm.py                ← Appel au modèle Mistral (gratuit)
 │   ├── prices.py             ← Gestionnaire de prix en temps réel
 │   ├── quests.py             ← Moteur de quêtes dynamiques
 │   ├── memory.py             ← Mémoire des joueurs
@@ -27,6 +31,9 @@ growgpt/
 | `GITHUB_TOKEN`   | Personal Access Token GitHub (repo scope) | `ghp_xxxx`         |
 | `GITHUB_OWNER`   | Ton pseudo GitHub                        | `TonPseudo`         |
 | `GITHUB_REPO`    | Nom du repo                              | `growgpt`           |
+| `LLM_API_KEY`    | Clé API Mistral (offre gratuite). Sans clé, GrowGPT garde ses réponses par mots-clés | `xxxx` |
+| `LLM_BASE_URL`   | Optionnel : autre API au format OpenAI   | `https://api.mistral.ai/v1` |
+| `LLM_MODEL`      | Optionnel : modèle utilisé               | `mistral-small-latest` |
 
 ---
 
@@ -133,8 +140,11 @@ Tu merges → Render redéploie automatiquement
 
 ## Script Roblox — Utilisation
 
-1. Mets `GrowGPT_PriceSync.lua` dans **ServerScriptService**
-2. Remplace `TON-APP.onrender.com` par ton URL Render
-3. Remplace `TON_SECRET` par la valeur de `ROBLOX_SECRET`
-4. Dans ton système de prix, appelle `syncPrices()` ou laisse le timer tourner
-5. Pour le chat, appelle `AskGrowGPT(player.UserId, message, playerData)`
+1. Active **Game Settings > Security > Allow HTTP Requests**
+2. Dans **ServerScriptService** : crée un ModuleScript `GrowGPT` (contenu de `roblox/GrowGPT.lua`) et un Script `GrowGPT_Chat` (contenu de `roblox/GrowGPT_Chat.server.lua`)
+3. Dans **StarterPlayer > StarterPlayerScripts** : crée un LocalScript `GrowGPT_Display` (contenu de `roblox/GrowGPT_Display.client.lua`)
+4. Dans le ModuleScript, remplace `TON-APP.onrender.com` par ton URL Render et `TON_SECRET` par la valeur de `ROBLOX_SECRET`
+5. Remplace `GetCurrentPrices()` et `getPlayerData()` par ton vrai système de prix et de stats
+6. En jeu, écris `@growgpt quoi planter ?` dans le chat
+
+Toutes les réponses passent par le filtre de texte Roblox avant d'être affichées (obligatoire pour du texte généré).
